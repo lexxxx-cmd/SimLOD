@@ -60,7 +60,7 @@ struct CudaPrintArgument{
 };
 
 template<>
-string CudaPrintArgument::get<string>() {
+inline string CudaPrintArgument::get<string>() {
 	const char* cstr = (const char*)data;
 	string value(cstr, size);
 

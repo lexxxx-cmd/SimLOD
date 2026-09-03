@@ -17,10 +17,14 @@ option(SimLOD_CreateCUDASymlinks "Create symbolic links instead of copying CUDA 
 
 add_executable(${PROJECT_NAME}
 	src/render/GLRenderer.cpp
+	src/render/ImGuiPanels.cpp
     src/common/unsuck_platform_specific.cpp
     src/loader/LasLoader.cpp
     src/loader/SimlodLoader.cpp
-	src/app/main.cpp)
+    src/loader/Loader.cpp
+	src/app/main.cpp
+	src/app/AppState.cpp
+	src/app/CudaHost.cpp)
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT ${PROJECT_NAME})
 set_target_properties(${PROJECT_NAME} PROPERTIES VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:${PROJECT_NAME}>"
                                                VS_DEBUGGER_COMMAND           "$<TARGET_FILE:${PROJECT_NAME}>"
