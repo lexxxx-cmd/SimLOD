@@ -32,6 +32,13 @@ using namespace fmt;
 
 using namespace std;
 
+// 双显卡(Optimus/可切换显卡)笔记本：强制 OpenGL 渲染走独立显卡。
+// 否则 GL 上下文落在核显上，CUDA-GL interop 的 cuGraphicsGLRegisterImage 会静默失败，
+// 表现为 kernel 正常运行、stats 正常，但画面全黑。
+// 必须以 EXE 导出形式存在，驱动在创建 GL 上下文前读取。
+extern "C" __declspec(dllexport) unsigned long NvOptimusEnablement = 0x00000001;
+extern "C" __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
+
 constexpr uint64_t PINNED_MEM_POOL_SIZE = 200;         // pool of pointers to batches of pinned memory
 constexpr uint64_t BATCH_STREAM_SIZE    = 50;          // ring buffer of batches that are async streamed to GPU
 constexpr uint64_t MAX_BATCH_SIZE       = 1'000'000;   // each loaded batch comprises <size> points
@@ -63,6 +70,10 @@ struct Point{
 		uint8_t rgba[4];
 	};
 };
+
+// 与 structures.cuh 中设备端 Point 是两份独立定义，仅靠 16 字节布局保持兼容
+// （阶段 2 目录重组时应合并为共享定义）。此断言由 MSVC 检查宿主侧。
+static_assert(sizeof(Point) == 16, "宿主 Point 必须与设备端 structures.cuh::Point 布局一致");
 
 struct PointBatch{
 	string file = "";
@@ -109,11 +120,11 @@ cudaStream_t stream_upload, stream_download;
 
 CudaModularProgram* cuda_program_update = nullptr;
 CudaModularProgram* cuda_program_render = nullptr;
-// CudaModularProgram* cuda_program_filter = nullptr;
 CudaModularProgram* cuda_program_reset  = nullptr;
 
-glm::mat4 transform;
-glm::mat4 transform_updatebound;
+// glm 1.0 的默认构造不再初始化为单位阵（0.9.9 会），显式给 identity
+glm::mat4 transform = glm::mat4(1.0f);
+glm::mat4 transform_updatebound = glm::mat4(1.0f);
 
 Stats stats;
 void* h_stats_pinned = nullptr;
@@ -226,7 +237,6 @@ bool requestReset                  = false;
 bool requestBenchmark              = false;
 atomic_bool requestStepthrough     = false;
 atomic_bool requestStep            = false;
-bool requestColorFiltering         = false;
 float renderingDuration            = 0.0f;
 uint32_t numPointsUploaded         = 0;
 float loadStart                    = 0.0f;
@@ -283,7 +293,8 @@ void initCuda(){
 Uniforms getUniforms(shared_ptr<GLRenderer> renderer){
 	Uniforms uniforms;
 
-	glm::mat4 world;
+	// glm 1.0 的默认构造不再初始化为单位阵（0.9.9 会），必须显式给出单位阵
+	glm::mat4 world = glm::mat4(1.0f);
 	glm::mat4 view = renderer->camera->view;
 	glm::mat4 proj = renderer->camera->proj;
 	glm::mat4 worldViewProj = proj * view * world;
@@ -427,40 +438,6 @@ void updateOctree(shared_ptr<GLRenderer> renderer){
 	// cuCtxSynchronize();
 }
 
-// post-process color-filtering.
-// computes average color values for voxels.
-// void doColorFiltering(shared_ptr<GLRenderer> renderer){
-
-// 	if(!lastBatchFinishedDevice) return;
-
-// 	Uniforms uniforms = getUniforms(renderer);
-
-// 	int workgroupSize = 256;
-// 	int numGroups = numSMs;
-
-// 	void* args[] = {
-// 		&uniforms,
-// 		&cptr_buffer, 
-// 		&cptr_nodes, 
-// 		&cptr_stats
-// 	};
-
-// 	printfmt("launching color filter!\n");
-
-// 	auto res_launch = cuLaunchCooperativeKernel(cuda_program_filter->kernels["kernel"],
-// 		numGroups, 1, 1,
-// 		workgroupSize, 1, 1,
-// 		0, 0, args);
-
-// 	if(res_launch != CUDA_SUCCESS){
-// 		const char* str; 
-// 		cuGetErrorString(res_launch, &str);
-// 		printf("error: %s \n", str);
-// 	}
-
-// 	requestColorFiltering = false;
-// }
-
 // draw the octree with a CUDA kernel
 void renderCUDA(shared_ptr<GLRenderer> renderer){
 
@@ -469,21 +446,37 @@ void renderCUDA(shared_ptr<GLRenderer> renderer){
 	static bool registered = false;
 	static GLuint registeredHandle = -1;
 
-	cuGraphicsGLRegisterImage(
-		&cugl_colorbuffer, 
-		renderer->view.framebuffer->colorAttachments[0]->handle, 
-		GL_TEXTURE_2D, 
+	// interop 链路任一步静默失败都会导致画面全黑，逐级检查并打印
+	auto checkCudaError = [](CUresult result, const char* what){
+		if(result != CUDA_SUCCESS){
+			const char* str;
+			cuGetErrorString(result, &str);
+			printfmt("CUDA interop error in {}: {} \n", what, str);
+		}
+	};
+
+	CUresult r;
+
+	r = cuGraphicsGLRegisterImage(
+		&cugl_colorbuffer,
+		renderer->view.framebuffer->colorAttachments[0]->handle,
+		GL_TEXTURE_2D,
 		CU_GRAPHICS_REGISTER_FLAGS_WRITE_DISCARD);
+	checkCudaError(r, "cuGraphicsGLRegisterImage");
 
 	// map OpenGL resources to CUDA
 	vector<CUgraphicsResource> dynamic_resources = {cugl_colorbuffer};
-	cuGraphicsMapResources(static_cast<int>(dynamic_resources.size()), dynamic_resources.data(), ((CUstream)CU_STREAM_DEFAULT));
+	r = cuGraphicsMapResources(static_cast<int>(dynamic_resources.size()), dynamic_resources.data(), ((CUstream)CU_STREAM_DEFAULT));
+	checkCudaError(r, "cuGraphicsMapResources");
 
 	CUDA_RESOURCE_DESC res_desc = {};
 	res_desc.resType = CUresourcetype::CU_RESOURCE_TYPE_ARRAY;
-	cuGraphicsSubResourceGetMappedArray(&res_desc.res.array.hArray, cugl_colorbuffer, 0, 0);
+	r = cuGraphicsSubResourceGetMappedArray(&res_desc.res.array.hArray, cugl_colorbuffer, 0, 0);
+	checkCudaError(r, "cuGraphicsSubResourceGetMappedArray");
+
 	CUsurfObject output_surf;
-	cuSurfObjectCreate(&output_surf, &res_desc);
+	r = cuSurfObjectCreate(&output_surf, &res_desc);
+	checkCudaError(r, "cuSurfObjectCreate");
 
 	cuEventRecord(ce_render_start, 0);
 
@@ -551,7 +544,12 @@ void initCudaProgram(shared_ptr<GLRenderer> renderer){
 	// allocate most gpu buffers
 	uint64_t nodesCapacity           = 200'000;
 	uint64_t estimatedNodeSize       = 200;           // see struct Node in progressive_octree.cu, but some more just in case
-	uint64_t cptr_buffer_bytes       = 300'000'000;
+	// momentary 分配器实测稳态需求 ~607MB（backlog 240MB + 其余），原值 300MB
+	// 长期越界写入相邻显存。640MB = 实测需求 + ~5% 余量，使分配回到界内。
+	// 注意：momentary Allocator 的 offset 为非原子、依赖全网格均匀调用的竞态
+	// 收敛，无法做调用点级容量检查，安全性只能靠背板 ≥ 需求保证。
+	// persistent 池为自适应分配，会自动吸收此变化。
+	uint64_t cptr_buffer_bytes       = 640'000'000;
 	uint64_t cptr_nodes_bytes        = nodesCapacity * estimatedNodeSize;
 	uint64_t cptr_renderbuffer_bytes = 200'000'000;
 
@@ -577,13 +575,46 @@ void initCudaProgram(shared_ptr<GLRenderer> renderer){
 	}
 
 	// allocate persistent (over multiple frames) buffer with remaining GPU memory
+	//
+	// 自适应策略：吃掉当前可用显存，仅预留安全余量（旧行为是 available * 0.80，
+	// 比例式余量不随机器规模伸缩——大显存机器浪费、小显存机器也未必合适）。
+	// 余量用于覆盖：后续小分配(cudaprint/cubin 加载等)、桌面合成器与其他进程的
+	// 动态需求、WDDM 逐页调度开销。余量过小会把整机推入共享内存页调度，反而劣化。
 	size_t availableMem = 0;
 	size_t totalMem = 0;
 	cuMemGetInfo(&availableMem, &totalMem);
 
-	size_t cptr_buffer_persistent_bytes = static_cast<size_t>(static_cast<double>(availableMem) * 0.80);
+	constexpr double RELATIVE_MARGIN = 0.05;   // 总显存的 5%
+	constexpr size_t ABSOLUTE_MARGIN = 256'000'000; // 且至少 256 MB
+	size_t margin = std::max<size_t>(size_t(double(totalMem) * RELATIVE_MARGIN), ABSOLUTE_MARGIN);
+
+	size_t cptr_buffer_persistent_bytes = (availableMem > margin)
+		? availableMem - margin
+		: availableMem / 2;
+
 	persistentBufferCapacity = cptr_buffer_persistent_bytes;
-	cuMemAlloc(&cptr_buffer_persistent, cptr_buffer_persistent_bytes);
+
+	// 分配失败(如桌面临时占用大)则逐次砍半重试，不再静默吞掉返回值
+	CUresult memResult = cuMemAlloc(&cptr_buffer_persistent, cptr_buffer_persistent_bytes);
+	for(int retry = 0; memResult != CUDA_SUCCESS && retry < 3; retry++){
+		const char* errStr = "";
+		cuGetErrorString(memResult, &errStr);
+		printfmt("cuMemAlloc(persistent, {} MB) failed: {} - retrying with half size \n",
+			cptr_buffer_persistent_bytes / 1'000'000llu, errStr);
+
+		cptr_buffer_persistent_bytes = cptr_buffer_persistent_bytes / 2;
+		persistentBufferCapacity = cptr_buffer_persistent_bytes;
+		memResult = cuMemAlloc(&cptr_buffer_persistent, cptr_buffer_persistent_bytes);
+	}
+	if(memResult != CUDA_SUCCESS){
+		printfmt("FATAL: cuMemAlloc(persistent) failed after retries \n");
+	}
+
+	printfmt("persistent buffer: total {:8L} MB, available {:8L} MB, margin {:8L} MB, allocated {:8L} MB \n",
+		totalMem / 1'000'000llu,
+		availableMem / 1'000'000llu,
+		margin / 1'000'000llu,
+		cptr_buffer_persistent_bytes / 1'000'000llu);
 
 	uint64_t total = cptr_buffer_bytes 
 		+ cptr_nodes_bytes
@@ -603,7 +634,6 @@ void initCudaProgram(shared_ptr<GLRenderer> renderer){
 	cuda_program_update = new CudaModularProgram({
 		.modules = {
 			"./modules/progressive_octree/progressive_octree_voxels.cu",
-			  //"./modules/progressive_octree/progressive_octree_mno.cu",
 			"./modules/progressive_octree/utils.cu",
 		},
 		.kernels = {"kernel_construct"}
@@ -624,14 +654,6 @@ void initCudaProgram(shared_ptr<GLRenderer> renderer){
 		},
 		.kernels = {"kernel_render"}
 	});
-
-	// cuda_program_filter = new CudaModularProgram({
-	// 	.modules = {
-	// 		"./modules/progressive_octree/colorfilter.cu",
-	// 		"./modules/progressive_octree/utils.cu",
-	// 	},
-	// 	.kernels = {"kernel"}
-	// });
 
 	cuEventCreate(&ce_render_start, 0);
 	cuEventCreate(&ce_render_end, 0);
@@ -1062,7 +1084,7 @@ void spawnUploader(shared_ptr<GLRenderer> renderer) {
 	setThreadPriorityHigh(t);
 }
 
-int main(){
+int main(int argc, char** argv){
 
 	auto renderer = make_shared<GLRenderer>();
 	auto cpu = getCpuData();
@@ -1082,23 +1104,6 @@ int main(){
 		boxSize.y * 0.5f,
 		boxSize.z * 0.1f
 	};
-
-	// renderer->controls->yaw    = 0.982;
-	// renderer->controls->pitch  = -0.875;
-	// renderer->controls->radius = 449.807;
-	// renderer->controls->target = { 1154.460, 218.177, -92.225, };
-
-	// renderer->controls->yaw    = 7.670;
-	// renderer->controls->pitch  = -0.677;
-	// renderer->controls->radius = 929.239;
-	// renderer->controls->target = { 606.560, 385.040, 13.848, };
-
-	// position: 448.8209204653559, 768.7683535080489, 23.676426584479366 
-	// renderer->controls->yaw    = -4.660;
-	// renderer->controls->pitch  = -0.293;
-	// renderer->controls->radius = 94.341;
-	// renderer->controls->target = { 354.609, 764.038, 25.101, };
-
 
 	initCuda();
 	initCudaProgram(renderer);
@@ -1149,6 +1154,15 @@ int main(){
 		}
 	});
 
+	// 命令行直接加载数据，便于自动化测试（与拖放等价；必须在 onFileDrop 注册之后调用）
+	if(argc > 1){
+		vector<string> files;
+		for(int i = 1; i < argc; i++){
+			files.push_back(argv[i]);
+		}
+		renderer->fileDropListeners.back()(files);
+	}
+
 	auto update = [&](){
 		cudaprint.update();
 
@@ -1178,10 +1192,6 @@ int main(){
 		if(!lastBatchFinishedDevice){
 			updateOctree(renderer);
 		}
-
-		// if(requestColorFiltering){
-		// 	doColorFiltering(renderer);
-		// }
 
 		if(!lastBatchFinishedDevice){
 			totalUpdateDuration = 1000.0f * (static_cast<float>(now()) - loadStart);
@@ -1222,6 +1232,31 @@ int main(){
 				printfmt("stats.numPointsProcessed = {} \n", stats.numPointsProcessed);
 				printfmt("numPointsTotal = {} \n", uint64_t(numPointsTotal));
 				printfmt("setting lastBatchFinishedDevice = {} \n", lastBatchFinishedDevice ? "true" : "false");
+			}
+
+			// 相机与可见性诊断（每 120 帧）
+			static int dbgFrameCounter = 0;
+			if((dbgFrameCounter++ % 120) == 0){
+				auto c = renderer->controls;
+				auto pos = c->getPosition();
+				printfmt("DBG frame {}: visibleNodes={} visiblePoints={} radius={:.1f} target=({:.1f},{:.1f},{:.1f}) pos=({:.1f},{:.1f},{:.1f}) \n",
+					dbgFrameCounter, stats.numVisibleNodes, stats.numVisiblePoints, c->radius,
+					c->target.x, c->target.y, c->target.z, pos.x, pos.y, pos.z);
+
+				Uniforms u = getUniforms(renderer);
+				printfmt("DBG2 boxMax=({:.1f},{:.1f},{:.1f}) transform row2=({:.4f},{:.4f},{:.4f},{:.4f}) row3=({:.4f},{:.4f},{:.4f},{:.4f}) \n",
+					u.boxMax.x, u.boxMax.y, u.boxMax.z,
+					u.transform.rows[2].x, u.transform.rows[2].y, u.transform.rows[2].z, u.transform.rows[2].w,
+					u.transform.rows[3].x, u.transform.rows[3].y, u.transform.rows[3].z, u.transform.rows[3].w);
+
+				glm::dmat4 cw = renderer->camera->world;
+				glm::dmat4 cv = renderer->camera->view;
+				glm::dmat4 cp = renderer->camera->proj;
+				printfmt("DBG3 camWorld col3=({:.3f},{:.3f},{:.3f},{:.3f}) view col3=({:.3f},{:.3f},{:.3f},{:.3f}) proj col0=({:.4f},{:.4f},{:.4f},{:.4f}) \n",
+					cw[3].x, cw[3].y, cw[3].z, cw[3].w,
+					cv[3].x, cv[3].y, cv[3].z, cv[3].w,
+					cp[0].x, cp[0].y, cp[0].z, cp[0].w);
+				cout.flush();
 			}
 		}
 
@@ -1387,10 +1422,6 @@ int main(){
 				toClipboard(str);
 #endif
 			}
-
-			// if(ImGui::Button("Do Color Filtering!")){
-			// 	requestColorFiltering = true;
-			// }
 
 			ImGui::End();
 		}
