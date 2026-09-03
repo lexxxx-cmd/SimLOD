@@ -16,11 +16,11 @@ option(SimLOD_CreateCUDASymlinks "Create symbolic links instead of copying CUDA 
 #   或 cmake -B build -DCMAKE_TOOLCHAIN_FILE=%VCPKG%/scripts/buildsystems/vcpkg.cmake
 
 add_executable(${PROJECT_NAME}
-	src/GLRenderer.cpp
-    include/unsuck_platform_specific.cpp
-    modules/progressive_octree/LasLoader.cpp
-    modules/progressive_octree/SimlodLoader.cpp
-	modules/progressive_octree/main_progressive_octree.cpp)
+	src/render/GLRenderer.cpp
+    src/common/unsuck_platform_specific.cpp
+    src/loader/LasLoader.cpp
+    src/loader/SimlodLoader.cpp
+	src/app/main.cpp)
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT ${PROJECT_NAME})
 set_target_properties(${PROJECT_NAME} PROPERTIES VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:${PROJECT_NAME}>"
                                                VS_DEBUGGER_COMMAND           "$<TARGET_FILE:${PROJECT_NAME}>"
@@ -40,9 +40,12 @@ endfunction()
 configure_build_type()
 
 target_include_directories(${PROJECT_NAME} PRIVATE
-    include
-	common
-	modules/progressive_octree)
+    src/common
+	src/cuda
+	src/render
+	src/loader
+	src/app
+	common)
 
 # Dependencies
 
