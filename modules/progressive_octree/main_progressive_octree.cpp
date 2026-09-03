@@ -21,7 +21,7 @@ using namespace fmt;
 #include "CudaModularProgram.h"
 #include "GLRenderer.h"
 #include "cudaGL.h"
-#include "../CudaPrint/CudaPrint.h"
+#include "CudaPrint/CudaPrint.h"
 
 #include "unsuck.hpp"
 #include "laszip_api.h"
@@ -632,25 +632,25 @@ void initCudaProgram(shared_ptr<GLRenderer> renderer){
 	printfmt("\n");
 
 	cuda_program_update = new CudaModularProgram({
-		.modules = {
-			"./modules/progressive_octree/progressive_octree_voxels.cu",
-			"./modules/progressive_octree/utils.cu",
+            .modules = {
+                    "./kernels/progressive_octree_voxels.cu",
+                    "./kernels/utils.cu",
 		},
 		.kernels = {"kernel_construct"}
 	});
 
 	cuda_program_reset = new CudaModularProgram({
-		.modules = {
-			"./modules/progressive_octree/reset.cu",
-			"./modules/progressive_octree/utils.cu",
+            .modules = {
+                    "./kernels/reset.cu",
+                    "./kernels/utils.cu",
 		},
 		.kernels = {"kernel"}
 	});
 
 	cuda_program_render = new CudaModularProgram({
-		.modules = {
-			"./modules/progressive_octree/render.cu",
-			"./modules/progressive_octree/utils.cu",
+            .modules = {
+                    "./kernels/render.cu",
+                    "./kernels/utils.cu",
 		},
 		.kernels = {"kernel_render"}
 	});

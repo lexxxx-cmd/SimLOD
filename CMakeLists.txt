@@ -41,7 +41,7 @@ configure_build_type()
 
 target_include_directories(${PROJECT_NAME} PRIVATE
     include
-	modules/CudaPrint
+	common
 	modules/progressive_octree)
 
 # Dependencies
@@ -110,13 +110,16 @@ endif (SimLOD_CreateCUDASymlinks)
 if (symlinksSupported OR NOT SimLOD_CreateCUDASymlinks)
 	add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
 		COMMAND ${CMAKE_COMMAND} -E copy_directory
-			"${PROJECT_SOURCE_DIR}/modules"
-			"$<TARGET_FILE_DIR:${PROJECT_NAME}>/modules"
-		COMMENT "POST BUILD: copying modules folder")
+			"${PROJECT_SOURCE_DIR}/kernels"
+			"$<TARGET_FILE_DIR:${PROJECT_NAME}>/kernels"
+		COMMAND ${CMAKE_COMMAND} -E copy_directory
+			"${PROJECT_SOURCE_DIR}/common"
+			"$<TARGET_FILE_DIR:${PROJECT_NAME}>/common"
+		COMMENT "POST BUILD: copying kernels and common folder")
 else ()
 	add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
 		COMMAND ${CMAKE_COMMAND} -E create_symlink
-			"${PROJECT_SOURCE_DIR}/modules"
-			"$<TARGET_FILE_DIR:${PROJECT_NAME}>/modules"
-		COMMENT "POST BUILD: creating symlink for modules folder")
+			"${PROJECT_SOURCE_DIR}/kernels"
+			"$<TARGET_FILE_DIR:${PROJECT_NAME}>/kernels"
+		COMMENT "POST BUILD: creating symlink for kernels folder")
 endif (symlinksSupported OR NOT SimLOD_CreateCUDASymlinks)

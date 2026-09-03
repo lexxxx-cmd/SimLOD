@@ -14,7 +14,7 @@
 #include "math.cuh"
 #include "structures.cuh"
 
-#include "../CudaPrint/CudaPrint.cuh"
+#include "CudaPrint/CudaPrint.cuh"
 
 namespace cg = cooperative_groups; 
 
