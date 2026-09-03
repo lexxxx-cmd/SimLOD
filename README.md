@@ -65,7 +65,8 @@ During rendering, a CUDA kernel first computes a list of visible octree nodes. E
 
 ### Install Dependencies
 
-* CUDA Toolkit 12.4
+* CUDA Toolkit 12.x (11.8 lacks nvJitLink)
+* [vcpkg](https://github.com/microsoft/vcpkg) with the following packages installed (classic mode): `fmt`, `glm`, `imgui[glfw-binding,opengl3-binding]`, `implot`, `laszip`, `glew`, `glfw3`
 
 ### Build & Run
 
@@ -73,20 +74,18 @@ During rendering, a CUDA kernel first computes a list of visible octree nodes. E
 
 * Prebuilt binaries are available at the release page: https://github.com/m-schuetz/SimLOD/releases/
 
-#### Windows with Visual Studio 2022
+#### Windows with Visual Studio 2022 (CMake Presets, vcpkg dependencies)
 
-* Create Visual Studio 2022 project files:
+* Requires vcpkg at `E:\vcpkg` (adjust `CMakePresets.json` / `CMakeSettings.json` if yours is elsewhere) and CUDA Toolkit 12.5 at the default install location.
 
 ```
-mkdir build
-cd build
-cmake ../ -G "Visual Studio 17 2022" -A x64
+cmake --preset vcpkg-release
+cmake --build out/build/vcpkg-release --config Release
 ```
 
-* Open build/SimLOD.sln
-* Switch to Release mode
-* Compile and Run (Ctrl + F5)
-* Drag&Drop point clouds in *.las, *.laz or *.simlod format into the application.
+* The executable is at `out/build/vcpkg-release/Release/SimLOD.exe`.
+* Command line data loading: `SimLOD.exe <file.las|laz|simlod>`, or drag&drop into the application.
+* For Visual Studio debugging, open the folder in VS and pick the `x64-Debug` configuration (vcpkg toolchain and CUDA path are preconfigured via `CMakePresets.json` / `CMakeSettings.json`).
 
 #### Windows or Linux with CMake
 
@@ -99,8 +98,20 @@ cmake .. && make            # Configure CMake and build the SimLOD target
 
 ### Notes
 
-* The environment variable ```CUDA_PATH``` needs to point to the install location of CUDA Toolkit 11.8 (e.g., ```/usr/local/cuda-11.8```)
-* If you want to modify and hot reload CUDA code at runtime, make sure to set the work directory to the top-most folder of this repository instead of the binary target path. The project loads cuda files located relative to "./modules".
+* The environment variable ```CUDA_PATH``` needs to point to the install location of CUDA Toolkit 12.x (e.g., ```/usr/local/cuda-12.5```). CUDA 11.8 is not supported (missing nvJitLink).
+* If you want to modify and hot reload CUDA code at runtime, make sure to set the work directory to the top-most folder of this repository instead of the binary target path. The project loads cuda files located relative to "./kernels" (host/device shared headers relative to "./common").
+
+### Repository Layout
+
+```
+kernels/      CUDA kernel sources, compiled at runtime via NVRTC (hot-reloadable)
+common/       host & device shared headers (structures.cuh, HostDeviceInterface.h, ...) - guarded by static_assert layout contracts
+src/app/      program entry, CUDA host functions, shared application state
+src/loader/   LAS/LAZ/SIMLOD loaders, pinned-memory pool, loader & uploader threads
+src/render/   GLRenderer, orbit controls, ImGui panels
+src/cuda/     CudaModularProgram (NVRTC + nvJitLink runtime compilation)
+src/common/   unsuck utility library
+```
 
 ## Software Architecture
 
